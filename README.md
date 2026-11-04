@@ -3,6 +3,7 @@
 ### Generative Screen Content Video Compression with Selective Fidelity and Interaction-Aware Context
 
 Official code and model weights of GSCV (IEEE ISCAS 2027 submission).
+After our paper is accepted, we will open source the training weights for GSVC.
 
 ## Overview
 
