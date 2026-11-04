@@ -1,0 +1,22 @@
+# Versions of the environment that produced the paper's results (Python 3.10, RTX 5090).
+# Install torch==2.8.0 and torchvision==0.23.0 first (CUDA 12.8 build), and pytorch-lightning==2.6.6 with
+# --no-deps afterwards, see README.md.
+numpy==2.2.6
+scipy==1.15.3
+Pillow==12.3.0
+PyYAML==6.0.3
+omegaconf==2.3.1
+einops==0.8.2
+tqdm==4.70.1
+requests==2.34.2
+pandas==2.3.3
+matplotlib==3.10.9
+accelerate==1.15.0
+huggingface_hub==1.33.0
+transformers==5.18.0
+torchmetrics==1.9.0
+lightning-utilities==0.15.3
+lpips==0.1.4
+DISTS_pytorch==0.1
+pytorch_msssim==1.0.0
+torch-fidelity==0.4.0

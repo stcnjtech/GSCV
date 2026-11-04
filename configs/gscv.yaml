@@ -1,0 +1,205 @@
+# GSCV: GVC1D (32 tokens x 16 channels) with Selective Fidelity Allocation (SFA) and the Interaction-Aware Context
+# Model (IACM). model.gscv and rsm hold the final model; train.stages switch parts off for the earlier stages.
+# Paths are relative to the repository root.
+
+model:
+  training_module: 'None'     # GVC1D's option; train.stages.<stage>.trainable selects the trained parameters
+  memory:
+    use_memory: True
+    memory_num: 32
+    memory_dim: 512
+    total_memory_num: 512
+    memory_layers: 8
+  global_atten:
+    use_global_atten: True
+    decoder_global_attention_block_idx: [7, 15, 23]
+    encoder_global_attention_block_idx: [5, 11]
+  hyperprior:
+    use_hyperprior: True
+    z_channel: 128
+    N: 128
+  vq_model:
+    quantize_mode: vae
+    token_size: 16
+    vit_enc_model_size: "base"
+    vit_dec_model_size: "large"
+    vit_enc_patch_size: 16
+    vit_dec_patch_size: 16
+    num_latent_tokens: 32
+  gscv:
+    use_fmap: True            # SFA: class embeddings e_F on the encoder patch tokens and the decoder mask tokens
+    use_null_ctx: True        # learned null contexts of Refresh windows (trained in S2a, not used from S2b on)
+    use_gate: True            # IACM: gated memory update
+    use_state_embed: True     # IACM: state embedding e_S (window state, display duration)
+    gate_bias: 5.0            # initial gate bias: sigmoid(5) = 0.993, close to GVC1D's plain memory update
+    k_snap: 2                 # snapshot slots per window (taken from rsm.k_snap)
+  runtime: {null_ctx: False, refresh_reset: False}   # Refresh windows keep their context and memory
+
+dataset:
+  preprocessing:
+    crop_size: 256
+
+rsm:                          # window state machine (modeling/gscv/rsm.py, RSMConfig)
+  block: 64                   # class map F_t: 64x64 blocks ...
+  topk: 8                     # ... palette-like if the 8 most frequent colours ...
+  cov_thr: 0.85               # ... cover >= 85% of the pixels; then text and graphics if ...
+  edge_thr: 48.0              # ... >= 0.5% of the pixels differ in luma by >= 48 from their right or lower
+  edge_frac: 0.005            # neighbour, otherwise flat; all other blocks are textures
+  tol: 0                      # per-pixel tolerance of "unchanged" (0 = bit-exact)
+  static_mad: 0.5             # windows with MAD <= 0.5 and no pixel changed by more than 16 are static
+  static_peak: 16             # (noisy recordings); bit-exact content is unaffected
+  refresh_frac: 0.5           # Refresh: >= 50% of the pixels changed ...
+  refresh_mad: 20.0           # ... with a mean absolute difference >= 20
+  n_refine: 2                 # length of the refresh period
+  restart_on_change: True     # a change inside a refresh period restarts it
+  a_min: 8                    # content shown for >= a_min + 1 = 9 frames is snapshotted when it changes
+  k_snap: 2                   # snapshots per window
+  revert_mad: 0.0             # Revert: bit-exact match with a snapshot
+  fid_qp_frac: 0.25           # rho_k >= 0.25 raises the window's quality index ...
+  delta_f: 1                  # ... by 1
+  delta_r: 1                  # r_k: Refresh windows and refinements in the refresh period, +1
+  iframe_refresh: True        # after an I-frame, windows with rho_k >= 0.25 start in a refresh period
+  header_bits: 4              # frame header: frame type (1 bit) + base quality index (3 bits)
+  use_skip: True
+  use_refresh: True
+  use_revert: True
+
+losses:                       # modeling/gscv/losses.py
+  lmbdas: [0.07, 1.5]         # lambda of the 8 quality indices, log-spaced (as GVC1D)
+  region: True                # region-adaptive objective (False: GVC1D's objective)
+  lambda_fid: 2.0             # lambda_fid = 2 lambda
+  lambda_tex: 1.0             # lambda_gen = lambda
+  alpha_edge: 2.0             # alpha: Sobel gradient error of text and graphics
+  gamma_fid: 1.0              # beta: LPIPS of the fidelity-critical regions
+  gamma: 1.0                  # gamma: LPIPS of the textures
+  gvc1d_lpips_weight: 1.0     # LPIPS weight of GVC1D's objective (S0)
+  gan_weight: 0.1             # delta, times GVC1D's adaptive weight (<= 1)
+  adaptive_gan: True
+  lecam_weight: 0.001
+
+I_frame_codec:
+  config: "modeling/dlf/codec_sq_fixbpp_for_test.yaml"
+  ckpt: "ckpts/I_frame/DLF.ckpt"    # GVC1D's release; scripts/slim_dlf.py writes a 5 GB copy with the codec only
+
+data:
+  root: "data/scvcd5k"                                   # SCVCD-5K frames: <root>/<clip>/im00001.png ...
+  train_entries: "data/scvcd5k/train_entries.json"      # training entries {clip, start, end}
+  test_set: "data/scvcd5k/SCVCD5K_TEST64"                # validation clips (description.json): the 64 test clips
+  crop: 512
+  max_gap: 6                  # GVC1D's max_frame_distance
+  num_workers: 8
+  bias_crop: 0.5              # half of the crops: the best of 4 positions by changing windows / mixed content
+  aug: {switch: 0.2, freeze: 0.3, transient: 0.2, popup: 0.15, cursor: 0.3}   # interaction events
+
+# Training in passes: a pass uses every training entry once at a constant learning rate. A pass is [frames, lr]
+# or {frames, lr, group, batch}: group = P-frames per optimiser step (1 = GVC1D's non-cascaded short sequences;
+# default cascade_group), batch = per GPU (default batch_per_gpu). The stages below are the ones of the released
+# weights (4 GPUs).
+train:
+  output_root: "runs/gscv"
+  batch_per_gpu: 1
+  weight_decay: 1.0e-4
+  max_grad_norm: 0.2          # as GVC1D
+  ckpt_stride: 1              # gradient checkpointing of every n-th transformer layer (1 = all, as GVC1D; 0 = none)
+  log_every: 50
+  saves_per_pass: 1
+  resume_every: 1000          # parameter updates between two writes of the resume checkpoint ckpt.pt
+  eval_before: True           # validate the starting weights before the first pass
+  evals_per_pass: 1
+  eval_qps: [0, 7]            # as GVC1D's eval_reconstruction
+  eval_crop: 512
+  seed: 42
+  stages:
+    # S0: GVC1D fine-tuned on SCVCD-5K with GVC1D's objective, every GSCV part off
+    S0:
+      init: "ckpts/32x16/pytorch_model.bin"
+      trainable: all
+      cascade_group: 4
+      passes: [[33, 3.0e-6]]
+      gscv: {use_fmap: False, use_null_ctx: False, use_gate: False, use_state_embed: False}
+      states: False
+      qp_alloc: False
+      region: False
+      rand_f: 0.0
+      gan: False
+    # S1a: SFA, only the class embeddings trained
+    S1a:
+      init: "${train.output_root}/S0/final.pt"
+      trainable: content_new
+      cascade_group: 4
+      passes:
+        - {frames: 2, lr: 5.0e-5, group: 1, batch: 4}
+        - {frames: 3, lr: 5.0e-5, group: 1, batch: 4}
+        - {frames: 4, lr: 5.0e-5, group: 1, batch: 4}
+        - {frames: 6, lr: 5.0e-5, group: 1, batch: 4}
+        - [33, 5.0e-5]
+      losses: {alpha_edge: 1.0, gamma_fid: 0.0}   # as in our run (the later stages use the values above)
+      gscv: {use_fmap: True, use_null_ctx: False, use_gate: False, use_state_embed: False}
+      states: False
+      qp_alloc: True
+      region: True
+      rand_f: 0.3
+      gan: False
+    # S1b: SFA, full model
+    S1b:
+      init: "${train.output_root}/S1a/final.pt"
+      trainable: all
+      cascade_group: 4
+      passes: [[33, 1.0e-5], [33, 1.0e-5], [33, 5.0e-6]]
+      gscv: {use_fmap: True, use_null_ctx: False, use_gate: False, use_state_embed: False}
+      states: False
+      qp_alloc: True
+      region: True
+      rand_f: 0.3
+      gan: False
+    # S2a: IACM, only its new parameters trained (null contexts, state embedding, memory gate)
+    S2a:
+      init: "${train.output_root}/S1b/final.pt"
+      trainable: change_new
+      runtime: {null_ctx: True, refresh_reset: True}    # Refresh windows: null contexts and a memory reset
+      cascade_group: 4
+      passes: [[3, 5.0e-5], [4, 5.0e-5], [6, 5.0e-5], [13, 5.0e-5], [33, 5.0e-5], [33, 5.0e-6]]
+      gscv: {use_fmap: True, use_null_ctx: True, use_gate: True, use_state_embed: True}
+      states: True
+      qp_alloc: True
+      region: True
+      rand_f: 0.3
+      gan: False
+    # S2b: IACM, full model; Refresh windows keep their context and memory from here on
+    S2b:
+      init: "${train.output_root}/S2a/final.pt"
+      trainable: all
+      cascade_group: 4
+      passes: [[33, 3.0e-6]]
+      gscv: {use_fmap: True, use_null_ctx: True, use_gate: True, use_state_embed: True}
+      states: True
+      qp_alloc: True
+      region: True
+      rand_f: 0.3
+      gan: False
+    # S3_disc: a GAN run from S2b with a new discriminator (cascade groups of 3); only its discriminator is kept:
+    # it initialises S3, so that the generator never follows an untrained discriminator
+    S3_disc:
+      init: "${train.output_root}/S2b/final.pt"
+      trainable: all
+      cascade_group: 3
+      passes: [[3, 1.0e-6], [5, 1.0e-6], [7, 1.0e-6], [13, 1.0e-6], [33, 1.0e-6]]
+      gscv: {use_fmap: True, use_null_ctx: True, use_gate: True, use_state_embed: True}
+      states: True
+      qp_alloc: True
+      region: True
+      rand_f: 0.3
+      gan: True
+    # S3: the final model, from S2b with the discriminator of S3_disc, texture-region GAN, full model
+    S3:
+      init: "${train.output_root}/S2b/final.pt"
+      trainable: all
+      cascade_group: 4
+      passes: [[33, 1.0e-6]]
+      disc_init: "${train.output_root}/S3_disc/disc_final.pt"
+      gscv: {use_fmap: True, use_null_ctx: True, use_gate: True, use_state_embed: True}
+      states: True
+      qp_alloc: True
+      region: True
+      rand_f: 0.3
+      gan: True
