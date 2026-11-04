@@ -1,4 +1,4 @@
-# GSCV
+# Generative Screen Content Video Compression(GSCV)
 
 ### Generative Screen Content Video Compression with Selective Fidelity and Interaction-Aware Context
 
